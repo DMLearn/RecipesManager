@@ -32,8 +32,25 @@ from llama_index.llms.openai import OpenAI
 load_dotenv()
 
 # Target repository and PR to review, sourced from environment variables
-repo_url = os.getenv("REPOSITORY")
-pr_number = os.getenv("PR_NUMBER")
+# Support for both environment variables and command line arguments for flexibility in CI environments
+import sys
+
+def get_config(key, index=None, default=None):
+    # Try getting from command line if index is provided
+    if index is not None and len(sys.argv) > index:
+        return sys.argv[index]
+    # Try getting from environment
+    return os.getenv(key, default)
+
+github_token = get_config("GITHUB_TOKEN", 1)
+repo_name = get_config("REPOSITORY", 2)
+pr_number = get_config("PR_NUMBER", 3)
+openai_api_key = get_config("OPENAI_API_KEY", 4)
+openai_api_base = get_config("OPENAI_API_BASE", 5) or os.getenv("OPENAI_BASE_URL")
+
+# Normalize repo_name to always be owner/repo
+if repo_name and "github.com/" in repo_name:
+    repo_name = repo_name.split("github.com/")[-1].replace(".git", "")
 
 
 def get_pr_details(pr_number: int) -> dict:
@@ -47,15 +64,11 @@ def get_pr_details(pr_number: int) -> dict:
         A dictionary containing PR details including author (pr.user.login), title, body, diff_url, state, and commit SHAs
     """
     # Initialize GitHub client (using unauthenticated access or set GITHUB_TOKEN env variable)
-    g = Github(auth=Auth.Token(os.getenv("GITHUB_TOKEN")))
+    g = Github(auth=Auth.Token(github_token))
 
     try:
-        # Extract owner and repo name from repo_url
-        # Format: https://github.com/owner/repo.git
-        repo_path = repo_url.replace("https://github.com/", "").replace(".git", "")
-
         # Get the repository
-        repo: Repository = g.get_repo(repo_path)
+        repo: Repository = g.get_repo(repo_name)
 
         # Get the pull request
         pr = repo.get_pull(pr_number)
@@ -92,14 +105,11 @@ def get_commit_details(commit_sha: str) -> dict:
         A dictionary containing commit details including files changed with their filename, status, additions, deletions, changes, and patch (diff)
     """
     # Initialize GitHub client
-    g = Github(auth=Auth.Token(os.getenv("GITHUB_TOKEN")))
+    g = Github(auth=Auth.Token(github_token))
 
     try:
-        # Extract owner and repo name from repo_url
-        repo_path = repo_url.replace("https://github.com/", "").replace(".git", "")
-
         # Get the repository
-        repo: Repository = g.get_repo(repo_path)
+        repo: Repository = g.get_repo(repo_name)
 
         # Get the commit
         commit = repo.get_commit(commit_sha)
@@ -136,14 +146,11 @@ def get_file_content(file_path: str) -> str:
     Returns:
         The content of the file as a string.
     """
-    g = Github(auth=Auth.Token(os.getenv("GITHUB_TOKEN")))
+    g = Github(auth=Auth.Token(github_token))
 
     try:
-        # Extract owner and repo name from repo_url
-        repo_path = repo_url.replace("https://github.com/", "").replace(".git", "")
-
         # Get the repository
-        repo: Repository = g.get_repo(repo_path)
+        repo: Repository = g.get_repo(repo_name)
 
         # Get the file content
         content_file = repo.get_contents(file_path)
@@ -291,14 +298,11 @@ def post_review_to_github(pr_number: int, comment: str) -> str:
     Returns:
         A confirmation message indicating the review was posted successfully.
     """
-    g = Github(auth=Auth.Token(os.getenv("GITHUB_TOKEN")))
+    g = Github(auth=Auth.Token(github_token))
 
     try:
-        # Extract owner and repo name from repo_url
-        repo_path = repo_url.replace("https://github.com/", "").replace(".git", "")
-
         # Get the repository
-        repo: Repository = g.get_repo(repo_path)
+        repo: Repository = g.get_repo(repo_name)
 
         # Get the pull request
         pr = repo.get_pull(pr_number)
@@ -324,7 +328,7 @@ post_review_tool = FunctionTool.from_defaults(
 # ---------------------------------------------------------------------------
 
 # Shared LLM instance used by all three agents
-llm = OpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_API_BASE"))
+llm = OpenAI(model="gpt-4o-mini", api_key=openai_api_key, base_url=openai_api_base)
 
 # ContextAgent: responsible for gathering all PR information from GitHub
 context_agent = FunctionAgent(
@@ -417,7 +421,11 @@ workflow_agent = AgentWorkflow(
 
 async def main():
     """Entry point: runs the workflow and streams events to stdout."""
-    query = "Write a review for PR: " + pr_number
+    if not pr_number:
+        print("Error: PR_NUMBER is not set.", flush=True)
+        return
+
+    query = "Write a review for PR: " + str(pr_number)
     prompt = RichPromptTemplate(query)
 
     handler = workflow_agent.run(prompt.format())
