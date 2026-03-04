@@ -334,7 +334,7 @@ llm = OpenAI(model="gpt-4o-mini", api_key=openai_api_key, base_url=openai_api_ba
 context_agent = FunctionAgent(
     tools=[pr_details_tool, commit_details_tool, changed_files_tool, file_content_tool, store_context_state_tool],
     llm=llm,
-    verbose=False,
+    verbose=True,
     can_handoff_to=["CommentorAgent"],
     name="ContextAgent",
     description="Uses the GitHub API to retrieve context for a pull request.",
@@ -385,7 +385,7 @@ Step 4: After submit_draft_review returns, hand off to ReviewAndPostingAgent.
 review_agent = FunctionAgent(
     tools=[retrieve_context_state_tool, post_review_tool],
     llm=llm,
-    verbose=False,
+    verbose=True,
     can_handoff_to=["CommentorAgent"],
     name="ReviewAndPostingAgent",
     description="Retrieves the draft review from state and posts it to GitHub after a quality check.",
@@ -421,9 +421,14 @@ workflow_agent = AgentWorkflow(
 
 async def main():
     """Entry point: runs the workflow and streams events to stdout."""
-    if not pr_number:
-        print("Error: PR_NUMBER is not set.", flush=True)
-        return
+    # Validate required config before starting
+    missing = [k for k, v in {"GITHUB_TOKEN": github_token, "REPOSITORY": repo_name,
+                               "PR_NUMBER": pr_number, "OPENAI_API_KEY": openai_api_key}.items() if not v]
+    if missing:
+        print(f"Error: missing required config: {', '.join(missing)}", flush=True)
+        sys.exit(1)
+
+    print(f"Starting review for PR #{pr_number} in {repo_name}", flush=True)
 
     query = "Write a review for PR: " + str(pr_number)
     prompt = RichPromptTemplate(query)
@@ -431,26 +436,32 @@ async def main():
     handler = workflow_agent.run(prompt.format())
 
     current_agent = None
-    async for event in handler.stream_events():
-        # Print agent transitions so the operator can follow the workflow
-        if hasattr(event, "current_agent_name") and event.current_agent_name != current_agent:
-            current_agent = event.current_agent_name
-            print(f"Current agent: {current_agent}", flush=True)
-        elif isinstance(event, AgentStream):
-            if event.delta:
-                print(event.delta, end="", flush=True)
-            if event.thinking_delta:
-                print(event.thinking_delta, end="", flush=True)
-        elif isinstance(event, AgentOutput):
-            if event.tool_calls:
-                tool_names = [tc.tool_name for tc in event.tool_calls]
-                print(f"Selected tools: {tool_names}", flush=True)
-            if event.response.content:
-                print(f"\nFinal response: {event.response.content}", flush=True)
-        elif isinstance(event, ToolCall):
-            print(f"Calling selected tool: {event.tool_name}, with arguments: {event.tool_kwargs}", flush=True)
-        elif isinstance(event, ToolCallResult):
-            print(f"Output from tool: {event.tool_output}", flush=True)
+    try:
+        async for event in handler.stream_events():
+            # Print agent transitions so the operator can follow the workflow
+            if hasattr(event, "current_agent_name") and event.current_agent_name != current_agent:
+                current_agent = event.current_agent_name
+                print(f"\n--- Agent: {current_agent} ---", flush=True)
+            elif isinstance(event, AgentStream):
+                if event.delta:
+                    print(event.delta, end="", flush=True)
+                if event.thinking_delta:
+                    print(event.thinking_delta, end="", flush=True)
+            elif isinstance(event, AgentOutput):
+                if event.tool_calls:
+                    tool_names = [tc.tool_name for tc in event.tool_calls]
+                    print(f"Selected tools: {tool_names}", flush=True)
+                if event.response.content:
+                    print(f"\nFinal response: {event.response.content}", flush=True)
+            elif isinstance(event, ToolCall):
+                print(f"Calling tool: {event.tool_name}, args: {event.tool_kwargs}", flush=True)
+            elif isinstance(event, ToolCallResult):
+                print(f"Tool result: {event.tool_output}", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"\nWorkflow error: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
