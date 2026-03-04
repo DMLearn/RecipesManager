@@ -1,5 +1,18 @@
 """
-Please provide the full URL to your recipes-api GitHub repository below.
+Multi-agent PR review workflow for RecipesManager.
+
+This module implements an automated GitHub pull request review system using
+a three-agent LlamaIndex workflow:
+  - ContextAgent: fetches PR metadata and changed files from the GitHub API
+  - CommentorAgent: drafts a structured markdown review comment
+  - ReviewAndPostingAgent: validates the draft and posts it to the PR
+
+Required environment variables (set in a .env file or CI secrets):
+  GITHUB_TOKEN   - Personal access token with repo read/write permissions
+  OPENAI_API_KEY - OpenAI API key for the LLM
+  OPENAI_API_BASE - (optional) Custom OpenAI-compatible base URL
+  REPOSITORY     - Full GitHub repo URL, e.g. https://github.com/owner/repo
+  PR_NUMBER      - The pull request number to review
 """
 import asyncio
 import os
@@ -15,9 +28,10 @@ from llama_index.core.prompts import RichPromptTemplate
 from llama_index.core.tools import FunctionTool
 from llama_index.llms.openai import OpenAI
 
-# Load environment variables from .env file
+# Load environment variables from .env file so secrets are not hard-coded
 load_dotenv()
 
+# Target repository and PR to review, sourced from environment variables
 repo_url = os.getenv("REPOSITORY")
 pr_number = os.getenv("PR_NUMBER")
 
@@ -203,7 +217,11 @@ async def submit_draft_review(ctx: Context, draft_review: str) -> str:
     return "Draft review saved. You MUST now hand off to ReviewAndPostingAgent to post it."
 
 
-# Create FunctionTool for LlamaIndex
+# ---------------------------------------------------------------------------
+# Tool definitions — wrap plain Python functions as LlamaIndex FunctionTools
+# so agents can call them during the workflow.
+# ---------------------------------------------------------------------------
+
 pr_details_tool = FunctionTool.from_defaults(
     fn=get_pr_details,
     name="get_pr_details",
@@ -301,10 +319,14 @@ post_review_tool = FunctionTool.from_defaults(
     description="Post a review comment to a GitHub pull request. Takes the PR number and the comment text."
 )
 
-# Create LLM instance
+# ---------------------------------------------------------------------------
+# LLM and agent definitions
+# ---------------------------------------------------------------------------
+
+# Shared LLM instance used by all three agents
 llm = OpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_API_BASE"))
 
-# Create ReAct agent with tools
+# ContextAgent: responsible for gathering all PR information from GitHub
 context_agent = FunctionAgent(
     tools=[pr_details_tool, commit_details_tool, changed_files_tool, file_content_tool, store_context_state_tool],
     llm=llm,
@@ -325,7 +347,7 @@ so that other agents (like CommentorAgent) can retrieve and use it later.
 """
 )
 
-# Create Commentor agent with tools
+# CommentorAgent: drafts the review comment using context gathered by ContextAgent
 commentor_agent = FunctionAgent(
     tools=[retrieve_context_state_tool, submit_draft_review_tool],
     llm=llm,
@@ -355,6 +377,7 @@ Step 4: After submit_draft_review returns, hand off to ReviewAndPostingAgent.
 """
 )
 
+# ReviewAndPostingAgent: validates the draft review and posts it to GitHub
 review_agent = FunctionAgent(
     tools=[retrieve_context_state_tool, post_review_tool],
     llm=llm,
@@ -382,6 +405,9 @@ After posting, confirm to the user that the review was posted successfully.
 """
 )
 
+# Wire all agents into a single AgentWorkflow. The workflow starts at
+# ReviewAndPostingAgent, which will hand off to CommentorAgent or ContextAgent
+# as needed.
 workflow_agent = AgentWorkflow(
     agents=[context_agent, commentor_agent, review_agent],
     root_agent=review_agent.name,
@@ -390,6 +416,7 @@ workflow_agent = AgentWorkflow(
 
 
 async def main():
+    """Entry point: runs the workflow and streams events to stdout."""
     query = "Write a review for PR: " + pr_number
     prompt = RichPromptTemplate(query)
 
@@ -397,6 +424,7 @@ async def main():
 
     current_agent = None
     async for event in handler.stream_events():
+        # Print agent transitions so the operator can follow the workflow
         if hasattr(event, "current_agent_name") and event.current_agent_name != current_agent:
             current_agent = event.current_agent_name
             print(f"Current agent: {current_agent}", flush=True)
