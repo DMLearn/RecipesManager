@@ -307,8 +307,8 @@ def post_review_to_github(pr_number: int, comment: str) -> str:
         # Get the pull request
         pr = repo.get_pull(pr_number)
 
-        # Create the review
-        pr.create_review(body=comment)
+        # Create and submit the review as a comment (event="COMMENT" publishes it immediately)
+        pr.create_review(body=comment, event="COMMENT")
 
         return f"Review posted successfully to PR #{pr_number}"
     except Exception as e:
