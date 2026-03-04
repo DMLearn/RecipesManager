@@ -429,6 +429,17 @@ async def main():
         sys.exit(1)
 
     print(f"Starting review for PR #{pr_number} in {repo_name}", flush=True)
+    print(f"OpenAI base URL: {openai_api_base}", flush=True)
+
+    # Verify LLM connectivity before running the full workflow
+    try:
+        test = await llm.acomplete("Reply with OK")
+        print(f"LLM connection OK: {test}", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"LLM connection FAILED: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
 
     query = "Write a review for PR: " + str(pr_number)
     prompt = RichPromptTemplate(query)
